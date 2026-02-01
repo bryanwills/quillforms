@@ -9,7 +9,7 @@ import ConfigAPI from '@quillforms/config';
 /**
  * WordPress Dependencies
  */
-import { useState, useEffect } from '@wordpress/element';
+import { useState, useEffect, useMemo } from '@wordpress/element';
 import { useSelect } from '@wordpress/data';
 import apiFetch from '@wordpress/api-fetch';
 
@@ -59,6 +59,25 @@ const Display = (props) => {
 	const [loadingMessage, setLoadingMessage] = useState('');
 	const theme = useBlockTheme(attributes.themeId);
 	const answersColor = tinyColor(theme.answersColor);
+
+	// Get server-side QuillBooking data from form object (passed via PHP, no auth required)
+	// This data is injected by PHP filter on quillforms_renderer_form_object
+	const quillBookingData = useMemo(() => {
+		// Try to get from window.qfRender (renderer mode - public facing)
+		if (typeof window !== 'undefined' && window.qfRender?.formObject?.quillBookingData) {
+			return window.qfRender.formObject.quillBookingData;
+		}
+		return null;
+	}, []);
+
+	// Check if we're in admin/editor mode (authenticated) or public/renderer mode
+	// In public mode: editor.mode is 'off' or undefined, and isPreview is false
+	// In admin mode: editor.mode is 'on' or isPreview is true
+	const isAdminMode = editor?.mode === 'on' || isPreview === true;
+	
+	// Determine if we should use server data (public mode with data available)
+	// or API calls (admin mode or no server data)
+	const useServerData = quillBookingData !== null && !isAdminMode;
 
 	// Use useSelect to get field values directly from the store
 	const { parsedUsername, parsedEmail } = useSelect((select) => {
@@ -194,6 +213,18 @@ const Display = (props) => {
 	// Check if QuillBooking plugin is active
 	useEffect(() => {
 		const checkPluginStatus = async () => {
+			// PUBLIC MODE: Use server-provided data (no authentication needed)
+			// This data is injected by PHP and doesn't require API calls
+			if (useServerData) {
+				if (quillBookingData.isActive) {
+					setPluginStatus('active');
+				} else {
+					setPluginStatus(quillBookingData.pluginStatus || 'not_installed');
+				}
+				return;
+			}
+
+			// ADMIN/PREVIEW MODE: Use API calls (user is authenticated)
 			setLoadingMessage('Checking QuillBooking plugin...');
 
 			try {
@@ -299,7 +330,7 @@ const Display = (props) => {
 		};
 
 		checkPluginStatus();
-	}, []);
+	}, [useServerData, quillBookingData]);
 
 	// Generate event URL based on eventId
 	useEffect(() => {
@@ -309,6 +340,23 @@ const Display = (props) => {
 				setLoadingMessage('Loading event details...');
 
 				try {
+					// PUBLIC MODE: Use server-provided event data (no authentication needed)
+					if (useServerData && quillBookingData?.events?.[eventId]) {
+						const event = quillBookingData.events[eventId];
+						if (event && event.calendar && event.slug) {
+							const calendarSlug = event.calendar.slug || event.calendar.name;
+							const eventSlug = event.slug;
+							const baseUrl = quillBookingData.siteUrl || window.location.origin;
+							const generatedUrl = `${baseUrl}?quillbooking_calendar=${encodeURIComponent(calendarSlug)}&event=${encodeURIComponent(eventSlug)}`;
+							
+							setEventUrl(generatedUrl);
+							setIsLoadingEvent(false);
+							setLoadingMessage('');
+							return;
+						}
+					}
+
+					// ADMIN/PREVIEW MODE or fallback: Use API calls (user is authenticated)
 					// Add a delay to show loading state
 					await new Promise(resolve => setTimeout(resolve, 600));
 
@@ -348,7 +396,7 @@ const Display = (props) => {
 		};
 
 		generateEventUrl();
-	}, [eventId, pluginStatus]);
+	}, [eventId, pluginStatus, useServerData, quillBookingData]);
 
 	// Prepare iframe URL with parameters
 	useEffect(() => {
