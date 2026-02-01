@@ -381,3 +381,217 @@ class Quill_Booking_Block_Type extends Block_Type {
 // Register the block with the Blocks Manager
 Blocks_Manager::instance()->register( new Quill_Booking_Block_Type() );
 
+
+/**
+ * Class to handle QuillBooking data injection for public form rendering.
+ * This allows the frontend to access plugin status and event data without authenticated API calls.
+ *
+ * Using a class with static methods to avoid function name collisions and keep code organized.
+ *
+ * @since 1.0.0
+ */
+class Quill_Booking_Block_Data_Provider {
+
+	/**
+	 * Flag to track if the filter has been registered.
+	 *
+	 * @var bool
+	 */
+	private static $filter_registered = false;
+
+	/**
+	 * Initialize the data provider.
+	 * This method registers the filter only once.
+	 */
+	public static function init() {
+		if ( self::$filter_registered ) {
+			return;
+		}
+
+		add_filter( 'quillforms_renderer_form_object', array( __CLASS__, 'inject_quillbooking_data' ), 10, 2 );
+		self::$filter_registered = true;
+	}
+
+	/**
+	 * Check if the form contains a quill-booking block.
+	 *
+	 * @param array $blocks The blocks array.
+	 * @return bool True if form has quill-booking block.
+	 */
+	private static function form_has_booking_block( $blocks ) {
+		if ( ! is_array( $blocks ) ) {
+			return false;
+		}
+
+		foreach ( $blocks as $block ) {
+			if ( isset( $block['name'] ) && 'quill-booking' === $block['name'] ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Inject QuillBooking data into the form object.
+	 *
+	 * @param array $form_object The form object.
+	 * @param int   $form_id     The form ID.
+	 * @return array Modified form object with QuillBooking data.
+	 */
+	public static function inject_quillbooking_data( $form_object, $form_id ) {
+		// Only process if form has quill-booking block (performance optimization)
+		if ( ! isset( $form_object['blocks'] ) || ! self::form_has_booking_block( $form_object['blocks'] ) ) {
+			return $form_object;
+		}
+
+		// Check if QuillBooking plugin is active
+		$is_quillbooking_active = self::is_quillbooking_active();
+
+		// Determine plugin status
+		$plugin_status = $is_quillbooking_active ? 'active' : 'not_installed';
+
+		// Collect event data for all quill-booking blocks in the form
+		$events_data = array();
+		if ( $is_quillbooking_active ) {
+			foreach ( $form_object['blocks'] as $block ) {
+				if ( isset( $block['name'] ) && 'quill-booking' === $block['name'] && ! empty( $block['attributes']['eventId'] ) ) {
+					$event_id   = $block['attributes']['eventId'];
+					$event_data = self::get_event_data( $event_id );
+					if ( $event_data ) {
+						$events_data[ $event_id ] = $event_data;
+					}
+				}
+			}
+		}
+
+		// Add QuillBooking data to form object
+		$form_object['quillBookingData'] = array(
+			'pluginStatus' => $plugin_status,
+			'isActive'     => $is_quillbooking_active,
+			'events'       => $events_data,
+			'siteUrl'      => home_url(),
+		);
+
+		return $form_object;
+	}
+
+	/**
+	 * Check if QuillBooking plugin is active.
+	 *
+	 * @return bool True if active.
+	 */
+	private static function is_quillbooking_active() {
+		// Fast check using constants/classes first
+		if ( defined( 'QUILLBOOKING_VERSION' ) || class_exists( 'QuillBooking\\QuillBooking' ) ) {
+			return true;
+		}
+
+		// Check active plugins
+		$active_plugins = get_option( 'active_plugins', array() );
+		foreach ( $active_plugins as $plugin ) {
+			if ( strpos( $plugin, 'quillbooking' ) !== false || strpos( $plugin, 'QuillBooking' ) !== false ) {
+				return true;
+			}
+		}
+
+		// Check network-activated plugins in multisite
+		if ( is_multisite() ) {
+			$network_plugins = get_site_option( 'active_sitewide_plugins', array() );
+			foreach ( array_keys( $network_plugins ) as $plugin ) {
+				if ( strpos( $plugin, 'quillbooking' ) !== false || strpos( $plugin, 'QuillBooking' ) !== false ) {
+					return true;
+				}
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Get event data for a specific event ID.
+	 *
+	 * @param int $event_id The event ID.
+	 * @return array|null Event data or null if not found.
+	 */
+	private static function get_event_data( $event_id ) {
+		if ( ! $event_id ) {
+			return null;
+		}
+
+		// Try to use QuillBooking models if available (best approach)
+		if ( class_exists( 'QuillBooking\\Models\\Event_Model' ) && class_exists( 'QuillBooking\\Models\\Calendar_Model' ) ) {
+			try {
+				$event = \QuillBooking\Models\Event_Model::find( $event_id );
+				if ( $event ) {
+					$event_data = array(
+						'id'   => $event_id,
+						'slug' => $event->slug,
+					);
+
+					// Get calendar data
+					if ( $event->calendar_id ) {
+						$calendar = \QuillBooking\Models\Calendar_Model::find( $event->calendar_id );
+						if ( $calendar ) {
+							$event_data['calendar'] = array(
+								'id'   => $calendar->id,
+								'slug' => $calendar->slug,
+								'name' => $calendar->name,
+							);
+						}
+					}
+
+					return $event_data;
+				}
+			} catch ( \Exception $e ) {
+				// If model query fails, fall back to database query
+			}
+		}
+
+		// Fallback: Direct database query
+		global $wpdb;
+		$events_table    = $wpdb->prefix . 'quillbooking_events';
+		$calendars_table = $wpdb->prefix . 'quillbooking_calendars';
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		$event = $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT id, slug, calendar_id FROM {$events_table} WHERE id = %d", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$event_id
+			)
+		);
+
+		if ( $event ) {
+			$event_data = array(
+				'id'   => $event->id,
+				'slug' => $event->slug,
+			);
+
+			// Get calendar data
+			if ( $event->calendar_id ) {
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+				$calendar = $wpdb->get_row(
+					$wpdb->prepare(
+						"SELECT id, slug, name FROM {$calendars_table} WHERE id = %d", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+						$event->calendar_id
+					)
+				);
+
+				if ( $calendar ) {
+					$event_data['calendar'] = array(
+						'id'   => $calendar->id,
+						'slug' => $calendar->slug,
+						'name' => $calendar->name,
+					);
+				}
+			}
+
+			return $event_data;
+		}
+
+		return null;
+	}
+}
+
+// Initialize the data provider
+Quill_Booking_Block_Data_Provider::init();
