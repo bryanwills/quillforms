@@ -1,0 +1,883 @@
+<?php
+/**
+ * Forms service.
+ *
+ * @since 1.0.0
+ * @package QuillForms
+ * @subpackage MCP
+ */
+
+namespace QuillForms\MCP\Abilities;
+
+use QuillForms\Core;
+use QuillForms\Managers\Blocks_Manager;
+use WP_Error;
+use WP_Query;
+use WP_REST_Request;
+
+defined( 'ABSPATH' ) || exit;
+
+/**
+ * Does the actual reading and writing of forms.
+ *
+ * Writes are dispatched as internal REST requests against
+ * /wp/v2/quill_forms/<id> rather than calling update_post_meta() directly.
+ * That is deliberate: the REST fields registered by Quill Forms core carry the
+ * block-name enum, unique-id checks, wp_kses on messages, payment gateway and
+ * currency validation, and they fire the quillforms_form_*_updated actions that
+ * addons listen on. Raw meta writes bypass all of it and would let an agent
+ * silently corrupt a form.
+ *
+ * @since 1.0.0
+ */
+final class Forms_Service {
+
+	/**
+	 * Post type.
+	 *
+	 * @since 1.0.0
+	 */
+	public const POST_TYPE = 'quill_forms';
+
+	/**
+	 * List forms.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $input Input.
+	 * @return array
+	 */
+	public static function list_forms( array $input ) {
+		$status   = isset( $input['status'] ) ? (string) $input['status'] : 'any';
+		$search   = isset( $input['search'] ) ? (string) $input['search'] : '';
+		$per_page = isset( $input['per_page'] ) ? (int) $input['per_page'] : 20;
+		$page     = isset( $input['page'] ) ? (int) $input['page'] : 1;
+
+		$per_page = max( 1, min( 100, $per_page ) );
+		$page     = max( 1, $page );
+
+		if ( 'any' === $status ) {
+			$post_status = array( 'publish', 'draft', 'pending', 'private' );
+		} else {
+			$post_status = array( $status );
+		}
+
+		$args = array(
+			'post_type'      => self::POST_TYPE,
+			'post_status'    => $post_status,
+			'posts_per_page' => $per_page,
+			'paged'          => $page,
+			'orderby'        => 'date',
+			'order'          => 'DESC',
+		);
+		if ( '' !== $search ) {
+			$args['s'] = $search;
+		}
+
+		$query = new WP_Query( $args );
+		$forms = array();
+
+		foreach ( $query->posts as $post ) {
+			$forms[] = self::summarize( $post->ID, $post );
+		}
+
+		return array(
+			'forms' => $forms,
+			'total' => (int) $query->found_posts,
+			'page'  => $page,
+		);
+	}
+
+	/**
+	 * Build the compact summary used by list-forms.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param int      $form_id Form id.
+	 * @param \WP_Post $post    Post object.
+	 * @return array
+	 */
+	private static function summarize( $form_id, $post ) {
+		// Same source as every other ability, so blocks_count can never
+		// disagree with the array quillforms_get_form_blocks returns.
+		$blocks = self::read_blocks( $form_id );
+
+		return array(
+			'id'              => (int) $form_id,
+			'title'           => (string) get_the_title( $form_id ),
+			'status'          => (string) $post->post_status,
+			'blocks_count'    => count( $blocks ),
+			'responses_count' => self::responses_count( $form_id ),
+			'shortcode'       => self::shortcode( $form_id ),
+			'edit_url'        => (string) admin_url( 'admin.php?page=quillforms&path=/forms/' . $form_id . '/builder' ),
+			'preview_url'     => (string) get_permalink( $form_id ),
+			'date_created'    => self::created_date( $post ),
+		);
+	}
+
+	/**
+	 * Creation date, preferring GMT.
+	 *
+	 * WordPress leaves post_date_gmt zeroed for drafts, so fall back to the
+	 * site-local date rather than reporting 0000-00-00 to the model.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param \WP_Post $post Post object.
+	 * @return string
+	 */
+	private static function created_date( $post ) {
+		$gmt = (string) $post->post_date_gmt;
+
+		if ( '' !== $gmt && 0 !== strpos( $gmt, '0000-00-00' ) ) {
+			return $gmt;
+		}
+
+		return (string) $post->post_date;
+	}
+
+	/**
+	 * Responses count, tolerant of the entries class being unavailable.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param int $form_id Form id.
+	 * @return int
+	 */
+	public static function responses_count( $form_id ) {
+		if ( ! class_exists( '\QuillForms\Entries\Entry' ) ) {
+			return 0;
+		}
+		return (int) \QuillForms\Entries\Entry::get_count( $form_id );
+	}
+
+	/**
+	 * Shortcode string for a form.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param int $form_id Form id.
+	 * @return string
+	 */
+	public static function shortcode( $form_id ) {
+		return sprintf( '[quillforms id="%d" width="100%%" height="500px"]', (int) $form_id );
+	}
+
+	/**
+	 * Ensure a post id really is a Quill Forms form.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param mixed $form_id Form id.
+	 * @return int|WP_Error
+	 */
+	public static function validate_form_id( $form_id ) {
+		$form_id = (int) $form_id;
+		$post    = $form_id > 0 ? get_post( $form_id ) : null;
+
+		if ( ! $post || self::POST_TYPE !== $post->post_type ) {
+			return new WP_Error(
+				'quillforms_mcp_form_not_found',
+				sprintf( 'No Quill Forms form found with id %d.', $form_id ),
+				array( 'status' => 404 )
+			);
+		}
+
+		return $form_id;
+	}
+
+	/**
+	 * Get one form in full.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $input Input.
+	 * @return array|WP_Error
+	 */
+	public static function get_form( array $input ) {
+		$form_id = self::validate_form_id( $input['form_id'] ?? 0 );
+		if ( is_wp_error( $form_id ) ) {
+			return $form_id;
+		}
+
+		$post      = get_post( $form_id );
+		$form_data = Core::get_form_data( $form_id );
+
+		return array(
+			'id'              => (int) $form_id,
+			'title'           => (string) get_the_title( $form_id ),
+			'status'          => (string) $post->post_status,
+			'blocks'          => self::encode( self::read_blocks( $form_id ) ),
+			'messages'        => self::encode( $form_data['messages'] ?? array() ),
+			'notifications'   => self::encode( $form_data['notifications'] ?? array() ),
+			'settings'        => self::encode( Core::get_form_settings( $form_id ) ),
+			'theme_id'        => (int) Core::get_theme_id( $form_id ),
+			'responses_count' => self::responses_count( $form_id ),
+			'shortcode'       => self::shortcode( $form_id ),
+			'edit_url'        => (string) admin_url( 'admin.php?page=quillforms&path=/forms/' . $form_id . '/builder' ),
+		);
+	}
+
+	/**
+	 * Get just the blocks of a form.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $input Input.
+	 * @return array|WP_Error
+	 */
+	public static function get_form_blocks( array $input ) {
+		$form_id = self::validate_form_id( $input['form_id'] ?? 0 );
+		if ( is_wp_error( $form_id ) ) {
+			return $form_id;
+		}
+
+		return array(
+			'form_id' => (int) $form_id,
+			'blocks'  => self::encode( self::read_blocks( $form_id ) ),
+		);
+	}
+
+	/**
+	 * The authoritative block list for a form.
+	 *
+	 * Every ability — read and write alike — returns blocks through here, so a
+	 * caller never has to wonder whether the array it got back is the same
+	 * shape the next call will report.
+	 *
+	 * Blocks that Quill Forms injects at render time rather than storing are
+	 * filtered out. The honeypot is the current example: it is an anti-spam
+	 * field appended by Honeypot::inject_block() during read, it is not part of
+	 * the saved form, and an agent that saw it would be liable to try to edit
+	 * or delete a field that does not really exist.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param int $form_id Form id.
+	 * @return array
+	 */
+	private static function read_blocks( $form_id ) {
+		$blocks = Core::get_blocks( $form_id );
+		$blocks = is_array( $blocks ) ? $blocks : array();
+
+		$virtual = array( 'honeypot' );
+
+		$blocks = array_filter(
+			$blocks,
+			static function ( $block ) use ( $virtual ) {
+				return ! isset( $block['name'] ) || ! in_array( $block['name'], $virtual, true );
+			}
+		);
+
+		return array_values( $blocks );
+	}
+
+	/**
+	 * List the registered block types and their attribute schemas.
+	 *
+	 * Without this an agent has no way to know which block names are legal or
+	 * which attributes each one accepts.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @return array
+	 */
+	public static function list_block_types() {
+		$types = array();
+
+		foreach ( Blocks_Manager::instance()->get_all_registered() as $name => $block ) {
+			$supported = array();
+			if ( property_exists( $block, 'supported_features' ) ) {
+				$supported = (array) $block->supported_features;
+			}
+
+			$schema = method_exists( $block, 'get_attributes_schema' )
+				? (array) $block->get_attributes_schema()
+				: array();
+
+			$types[] = array(
+				'name'               => (string) $name,
+				'supported_features' => self::encode( $supported ),
+				'attributes_schema'  => self::encode( $schema ),
+			);
+		}
+
+		return array( 'block_types' => $types );
+	}
+
+	/**
+	 * Create a form.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $input Input.
+	 * @return array|WP_Error
+	 */
+	public static function create_form( array $input ) {
+		$title = isset( $input['title'] ) ? sanitize_text_field( (string) $input['title'] ) : '';
+		if ( '' === $title ) {
+			return new WP_Error(
+				'quillforms_mcp_missing_title',
+				'A form title is required.',
+				array( 'status' => 400 )
+			);
+		}
+
+		$status = isset( $input['status'] ) ? (string) $input['status'] : 'draft';
+		if ( ! in_array( $status, array( 'publish', 'draft' ), true ) ) {
+			$status = 'draft';
+		}
+
+		$form_id = wp_insert_post(
+			array(
+				'post_type'   => self::POST_TYPE,
+				'post_title'  => $title,
+				'post_status' => $status,
+			),
+			true
+		);
+
+		if ( is_wp_error( $form_id ) ) {
+			return $form_id;
+		}
+
+		$blocks = isset( $input['blocks'] ) && is_array( $input['blocks'] ) ? $input['blocks'] : array();
+		$blocks = self::prepare_blocks( $blocks );
+
+		$body = array( 'blocks' => $blocks );
+		if ( isset( $input['settings'] ) && is_array( $input['settings'] ) ) {
+			$body['settings'] = $input['settings'];
+		}
+		if ( isset( $input['messages'] ) && is_array( $input['messages'] ) ) {
+			$body['messages'] = $input['messages'];
+		}
+
+		$saved = self::save( $form_id, $body );
+		if ( is_wp_error( $saved ) ) {
+			// Roll back so a validation failure does not leave an empty husk.
+			wp_delete_post( $form_id, true );
+			return $saved;
+		}
+
+		return self::get_form( array( 'form_id' => $form_id ) );
+	}
+
+	/**
+	 * Replace the blocks of a form.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $input Input.
+	 * @return array|WP_Error
+	 */
+	public static function update_form_blocks( array $input ) {
+		$form_id = self::validate_form_id( $input['form_id'] ?? 0 );
+		if ( is_wp_error( $form_id ) ) {
+			return $form_id;
+		}
+
+		$blocks = isset( $input['blocks'] ) && is_array( $input['blocks'] ) ? $input['blocks'] : null;
+		if ( null === $blocks ) {
+			return new WP_Error(
+				'quillforms_mcp_missing_blocks',
+				'A blocks array is required.',
+				array( 'status' => 400 )
+			);
+		}
+
+		$prepared = self::prepare_blocks( $blocks );
+
+		// This ability replaces the whole array, so any field the caller left
+		// out is deleted. That is a reasonable thing to ask for deliberately
+		// and a very bad thing to do by accident — a forgotten field takes its
+		// answers' meaning with it, since existing responses keep pointing at a
+		// block id that no longer exists. Require the caller to acknowledge
+		// each removal by name rather than discovering it afterwards.
+		$existing = self::read_blocks( $form_id );
+		$kept     = array();
+		foreach ( $prepared as $block ) {
+			$kept[ $block['id'] ] = true;
+		}
+
+		$removed = array();
+		foreach ( $existing as $block ) {
+			if ( isset( $block['id'] ) && ! isset( $kept[ (string) $block['id'] ] ) ) {
+				$label     = $block['attributes']['label'] ?? '';
+				$label     = is_string( $label ) ? trim( wp_strip_all_tags( $label ) ) : '';
+				$removed[] = sprintf(
+					'%s (%s%s)',
+					(string) $block['id'],
+					(string) ( $block['name'] ?? 'unknown' ),
+					'' !== $label ? ': ' . $label : ''
+				);
+			}
+		}
+
+		if ( ! empty( $removed ) && empty( $input['confirm_deletions'] ) ) {
+			$responses = self::responses_count( $form_id );
+
+			return new WP_Error(
+				'quillforms_mcp_would_delete_fields',
+				sprintf(
+					'This would permanently delete %d field(s) not present in the supplied array: %s.%s Re-send with "confirm_deletions": true if that is intended, or use quillforms/update-field to change one field without touching the rest.',
+					count( $removed ),
+					implode( ', ', $removed ),
+					$responses > 0
+						? sprintf(
+							' This form has %d response(s); their answers to the deleted field(s) will no longer map to a question.',
+							$responses
+						)
+						: ''
+				),
+				array( 'status' => 409 )
+			);
+		}
+
+		$saved = self::save( $form_id, array( 'blocks' => $prepared ) );
+		if ( is_wp_error( $saved ) ) {
+			return $saved;
+		}
+
+		$result            = self::get_form_blocks( array( 'form_id' => $form_id ) );
+		$result['deleted'] = $removed;
+
+		return $result;
+	}
+
+	/**
+	 * Add a single field to a form.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $input Input.
+	 * @return array|WP_Error
+	 */
+	public static function add_field( array $input ) {
+		$form_id = self::validate_form_id( $input['form_id'] ?? 0 );
+		if ( is_wp_error( $form_id ) ) {
+			return $form_id;
+		}
+
+		$name = isset( $input['name'] ) ? (string) $input['name'] : '';
+		if ( ! Blocks_Manager::instance()->is_registered( $name ) ) {
+			return new WP_Error(
+				'quillforms_mcp_unknown_block',
+				sprintf( 'Unknown block type "%s". Call quillforms/list-block-types for the allowed names.', $name ),
+				array( 'status' => 400 )
+			);
+		}
+
+		$blocks = self::read_blocks( $form_id );
+
+		$block = array(
+			'id'         => self::generate_block_id( $blocks ),
+			'name'       => $name,
+			'attributes' => isset( $input['attributes'] ) && is_array( $input['attributes'] ) ? $input['attributes'] : array(),
+		);
+
+		$index = self::resolve_index( $blocks, $input );
+		if ( is_wp_error( $index ) ) {
+			return $index;
+		}
+
+		array_splice( $blocks, $index, 0, array( $block ) );
+
+		$saved = self::save( $form_id, array( 'blocks' => self::prepare_blocks( $blocks ) ) );
+		if ( is_wp_error( $saved ) ) {
+			return $saved;
+		}
+
+		return array(
+			'form_id'  => (int) $form_id,
+			'block_id' => $block['id'],
+			'blocks'   => self::encode( self::read_blocks( $form_id ) ),
+		);
+	}
+
+	/**
+	 * Patch one block's attributes.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $input Input.
+	 * @return array|WP_Error
+	 */
+	public static function update_field( array $input ) {
+		$form_id = self::validate_form_id( $input['form_id'] ?? 0 );
+		if ( is_wp_error( $form_id ) ) {
+			return $form_id;
+		}
+
+		$block_id = isset( $input['block_id'] ) ? (string) $input['block_id'] : '';
+		$blocks   = self::read_blocks( $form_id );
+		$found    = false;
+
+		foreach ( $blocks as $index => $block ) {
+			if ( isset( $block['id'] ) && (string) $block['id'] === $block_id ) {
+				$existing = isset( $block['attributes'] ) && is_array( $block['attributes'] )
+					? $block['attributes']
+					: array();
+				$patch    = isset( $input['attributes'] ) && is_array( $input['attributes'] )
+					? $input['attributes']
+					: array();
+
+				// Merge rather than replace: an agent patching one attribute
+				// must not silently drop the rest of the field's config.
+				$blocks[ $index ]['attributes'] = array_replace( $existing, $patch );
+				$found                          = true;
+				break;
+			}
+		}
+
+		if ( ! $found ) {
+			return new WP_Error(
+				'quillforms_mcp_block_not_found',
+				sprintf( 'No block with id "%s" in form %d.', $block_id, $form_id ),
+				array( 'status' => 404 )
+			);
+		}
+
+		$saved = self::save( $form_id, array( 'blocks' => self::prepare_blocks( $blocks ) ) );
+		if ( is_wp_error( $saved ) ) {
+			return $saved;
+		}
+
+		return array(
+			'form_id'  => (int) $form_id,
+			'block_id' => $block_id,
+			'blocks'   => self::encode( self::read_blocks( $form_id ) ),
+		);
+	}
+
+	/**
+	 * Delete one block.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $input Input.
+	 * @return array|WP_Error
+	 */
+	public static function delete_field( array $input ) {
+		$form_id = self::validate_form_id( $input['form_id'] ?? 0 );
+		if ( is_wp_error( $form_id ) ) {
+			return $form_id;
+		}
+
+		$block_id = isset( $input['block_id'] ) ? (string) $input['block_id'] : '';
+		$blocks   = self::read_blocks( $form_id );
+		$remaining = array();
+		$found     = false;
+
+		foreach ( $blocks as $block ) {
+			if ( isset( $block['id'] ) && (string) $block['id'] === $block_id ) {
+				$found = true;
+				continue;
+			}
+			$remaining[] = $block;
+		}
+
+		if ( ! $found ) {
+			return new WP_Error(
+				'quillforms_mcp_block_not_found',
+				sprintf( 'No block with id "%s" in form %d.', $block_id, $form_id ),
+				array( 'status' => 404 )
+			);
+		}
+
+		$saved = self::save( $form_id, array( 'blocks' => self::prepare_blocks( $remaining ) ) );
+		if ( is_wp_error( $saved ) ) {
+			return $saved;
+		}
+
+		return array(
+			'form_id' => (int) $form_id,
+			'deleted' => $block_id,
+			'blocks'  => self::encode( self::read_blocks( $form_id ) ),
+		);
+	}
+
+	/**
+	 * Update form title, status, settings, messages or theme.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $input Input.
+	 * @return array|WP_Error
+	 */
+	public static function update_form_settings( array $input ) {
+		$form_id = self::validate_form_id( $input['form_id'] ?? 0 );
+		if ( is_wp_error( $form_id ) ) {
+			return $form_id;
+		}
+
+		$body = array();
+		if ( isset( $input['title'] ) ) {
+			$body['title'] = sanitize_text_field( (string) $input['title'] );
+		}
+		if ( isset( $input['status'] ) && in_array( $input['status'], array( 'publish', 'draft' ), true ) ) {
+			$body['status'] = (string) $input['status'];
+		}
+		if ( isset( $input['settings'] ) && is_array( $input['settings'] ) ) {
+			$body['settings'] = $input['settings'];
+		}
+		if ( isset( $input['messages'] ) && is_array( $input['messages'] ) ) {
+			$body['messages'] = $input['messages'];
+		}
+		if ( isset( $input['theme_id'] ) ) {
+			$body['theme'] = (int) $input['theme_id'];
+		}
+
+		if ( empty( $body ) ) {
+			return new WP_Error(
+				'quillforms_mcp_nothing_to_update',
+				'Provide at least one of title, status, settings, messages or theme_id.',
+				array( 'status' => 400 )
+			);
+		}
+
+		$saved = self::save( $form_id, $body );
+		if ( is_wp_error( $saved ) ) {
+			return $saved;
+		}
+
+		return self::get_form( array( 'form_id' => $form_id ) );
+	}
+
+	/**
+	 * Duplicate a form.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $input Input.
+	 * @return array|WP_Error
+	 */
+	public static function duplicate_form( array $input ) {
+		$form_id = self::validate_form_id( $input['form_id'] ?? 0 );
+		if ( is_wp_error( $form_id ) ) {
+			return $form_id;
+		}
+
+		$title = isset( $input['title'] ) && '' !== $input['title']
+			? sanitize_text_field( (string) $input['title'] )
+			/* translators: %s: original form title. */
+			: sprintf( __( '%s (copy)', 'quillforms' ), get_the_title( $form_id ) );
+
+		$new_id = wp_insert_post(
+			array(
+				'post_type'   => self::POST_TYPE,
+				'post_title'  => $title,
+				'post_status' => 'draft',
+			),
+			true
+		);
+
+		if ( is_wp_error( $new_id ) ) {
+			return $new_id;
+		}
+
+		// Copy the meta that defines the form. Deliberately excludes
+		// coupons_usage_count, which is per-form usage state, not definition.
+		$keys = array( 'blocks', 'messages', 'notifications', 'payments', 'products', 'theme', 'settings', 'quiz', 'customCSS' );
+		foreach ( $keys as $key ) {
+			$value = get_post_meta( $form_id, $key, true );
+			if ( '' !== $value && null !== $value ) {
+				update_post_meta( $new_id, $key, $value );
+			}
+		}
+
+		return self::get_form( array( 'form_id' => $new_id ) );
+	}
+
+	/**
+	 * Delete a form.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $input Input.
+	 * @return array|WP_Error
+	 */
+	public static function delete_form( array $input ) {
+		$form_id = self::validate_form_id( $input['form_id'] ?? 0 );
+		if ( is_wp_error( $form_id ) ) {
+			return $form_id;
+		}
+
+		$force = ! empty( $input['force'] );
+		$title = (string) get_the_title( $form_id );
+
+		$result = $force ? wp_delete_post( $form_id, true ) : wp_trash_post( $form_id );
+		if ( ! $result ) {
+			return new WP_Error(
+				'quillforms_mcp_delete_failed',
+				sprintf( 'Could not delete form %d.', $form_id ),
+				array( 'status' => 500 )
+			);
+		}
+
+		return array(
+			'id'      => (int) $form_id,
+			'title'   => $title,
+			'deleted' => true,
+			'forced'  => $force,
+		);
+	}
+
+	/**
+	 * Normalize a caller-supplied blocks array.
+	 *
+	 * Fills in missing ids so an agent can post blocks without inventing them,
+	 * and guarantees every block has an attributes object.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $blocks Blocks.
+	 * @return array
+	 */
+	private static function prepare_blocks( array $blocks ) {
+		$prepared = array();
+		$seen     = array();
+
+		foreach ( $blocks as $block ) {
+			if ( ! is_array( $block ) || empty( $block['name'] ) ) {
+				continue;
+			}
+
+			$id = isset( $block['id'] ) ? (string) $block['id'] : '';
+			if ( '' === $id || isset( $seen[ $id ] ) ) {
+				$id = self::generate_block_id( $prepared );
+			}
+			$seen[ $id ] = true;
+
+			$prepared[] = array(
+				'id'         => $id,
+				'name'       => (string) $block['name'],
+				'attributes' => isset( $block['attributes'] ) && is_array( $block['attributes'] )
+					? $block['attributes']
+					: array(),
+			);
+		}
+
+		return $prepared;
+	}
+
+	/**
+	 * Work out where a new block should be inserted.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $blocks Existing blocks.
+	 * @param array $input  Input.
+	 * @return int|WP_Error Position, or an error if an anchor block id is unknown.
+	 */
+	private static function resolve_index( array $blocks, array $input ) {
+		$count = count( $blocks );
+
+		foreach ( array( 'before_block_id' => 0, 'after_block_id' => 1 ) as $key => $offset ) {
+			if ( empty( $input[ $key ] ) ) {
+				continue;
+			}
+			$target = (string) $input[ $key ];
+			foreach ( $blocks as $index => $block ) {
+				if ( isset( $block['id'] ) && (string) $block['id'] === $target ) {
+					return max( 0, min( $count, $index + $offset ) );
+				}
+			}
+
+			// Silently appending here would put the field somewhere the caller
+			// did not ask for, with no signal that the anchor was wrong.
+			return new WP_Error(
+				'quillforms_mcp_anchor_not_found',
+				sprintf( 'No block with id "%s" to position against.', $target ),
+				array( 'status' => 404 )
+			);
+		}
+
+		if ( isset( $input['index'] ) && is_numeric( $input['index'] ) ) {
+			return max( 0, min( $count, (int) $input['index'] ) );
+		}
+
+		return $count;
+	}
+
+	/**
+	 * Generate a block id in the same shape the editor produces.
+	 *
+	 * The editor uses Math.random().toString(36).substr(2, 9); we match the
+	 * alphabet and length but source randomness from wp_rand().
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param array $existing Blocks already allocated, to avoid collisions.
+	 * @return string
+	 */
+	private static function generate_block_id( array $existing = array() ) {
+		$taken = array();
+		foreach ( $existing as $block ) {
+			if ( isset( $block['id'] ) ) {
+				$taken[ (string) $block['id'] ] = true;
+			}
+		}
+
+		$alphabet = '0123456789abcdefghijklmnopqrstuvwxyz';
+		$max      = strlen( $alphabet ) - 1;
+
+		do {
+			$id = '';
+			for ( $i = 0; $i < 9; $i++ ) {
+				$id .= $alphabet[ wp_rand( 0, $max ) ];
+			}
+		} while ( isset( $taken[ $id ] ) );
+
+		return $id;
+	}
+
+	/**
+	 * Persist form changes through the core REST fields.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param int   $form_id Form id.
+	 * @param array $body    Fields to write.
+	 * @return true|WP_Error
+	 */
+	private static function save( $form_id, array $body ) {
+		$request = new WP_REST_Request( 'POST', '/wp/v2/' . self::POST_TYPE . '/' . (int) $form_id );
+		$request->set_header( 'Content-Type', 'application/json' );
+		$request->set_body_params( $body );
+
+		$response = rest_do_request( $request );
+
+		if ( $response->is_error() ) {
+			$error = $response->as_error();
+			return new WP_Error(
+				'quillforms_mcp_save_failed',
+				$error->get_error_message(),
+				array( 'status' => $response->get_status() )
+			);
+		}
+
+		return true;
+	}
+
+	/**
+	 * Make a value safe to return through an ability output schema.
+	 *
+	 * Output schemas here declare these payloads as JSON strings. Form blocks
+	 * and settings are deeply nested, heterogeneous and extensible by addons,
+	 * so enumerating them in a schema would be both enormous and wrong the
+	 * moment an addon registers a new attribute. Encoding keeps the contract
+	 * honest and the payload lossless.
+	 *
+	 * @since 1.0.0
+	 *
+	 * @param mixed $value Value.
+	 * @return string
+	 */
+	private static function encode( $value ) {
+		if ( ! is_array( $value ) && ! is_object( $value ) ) {
+			$value = array();
+		}
+		$json = wp_json_encode( $value );
+		return is_string( $json ) ? $json : '[]';
+	}
+}

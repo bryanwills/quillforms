@@ -62,7 +62,16 @@ class Core {
 			'qf.config.default.setPlans(' . json_encode( License::instance()->get_plans() ) . ');' .
 			'qf.config.default.setMessagesStructure(' . json_encode( Client_Messages::instance()->get_messages() ) . ');' .
 			'qf.config.default.setMaxUploadSize(' . wp_max_upload_size() / ( 1024 * 1024 ) . ');' .
-			'qf.config.default.setFormTemplates(' . json_encode(Templates_Manager::instance()->get_all_registered() ) . ');'
+			'qf.config.default.setFormTemplates(' . json_encode(Templates_Manager::instance()->get_all_registered() ) . ');' .
+			// The MCP settings tab needs the endpoint URL and whether this
+			// WordPress has the Abilities API at all; only the server can
+			// answer the second honestly.
+			'window.qfMcp = ' . wp_json_encode(
+				array(
+					'endpointUrl'  => rest_url( 'quillforms/v1/mcp' ),
+					'abilitiesApi' => \QuillForms\MCP\Abilities\Bootstrap::has_abilities_api(),
+				)
+			) . ';'
 		);
 	}
 

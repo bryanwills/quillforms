@@ -2,6 +2,7 @@
  * WordPress Dependencies
  */
 import { TabPanel } from '@wordpress/components';
+import { applyFilters } from '@wordpress/hooks';
 
 /**
  * Quill Forms Dependencies
@@ -24,6 +25,7 @@ import Integrations from './integrations';
 import Emails from './emails';
 import ReCAPTCHA from './recaptcha';
 import Geolocation from './geolocation';
+import MCP from './mcp';
 
 
 const Settings = () => {
@@ -61,7 +63,22 @@ const Settings = () => {
 			title: 'Geolocation',
 			render: <Geolocation />,
 		},
+		mcp: {
+			title: 'MCP Server',
+			render: <MCP />,
+		},
 	};
+
+	/**
+	 * Filters the settings page tabs.
+	 *
+	 * Lets an addon add its own settings tab without core having to know about
+	 * it. Each entry is keyed by tab slug and takes { title, render }; the key
+	 * is also what ?tab= matches, so an addon can deep link to its own tab.
+	 *
+	 * @param {Object} Tabs Tabs keyed by slug.
+	 */
+	Tabs = applyFilters('QuillForms.Settings.Tabs', Tabs);
 	// if (!isWPEnv) {
 	// 	// keep all tabs but we need general tab to be the last one in case of non WP env 
 	// 	// remove general tab first

@@ -158,6 +158,11 @@ final class QuillForms {
 		Site::instance();
 		Shortcode::instance();
 		Entries::instance();
+
+		// MCP server. Everything behind this is additive and gated: it needs
+		// the WordPress Abilities API (6.9+) and an explicit admin opt-in, so
+		// on an older or un-opted-in site nothing is registered.
+		MCP\Abilities\Bootstrap::init();
 	}
 
 	/**

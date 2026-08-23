@@ -131,7 +131,25 @@ class REST_Settings_Controller extends REST_Controller {
 								'default' => '',
 						)
 					),
-				)
+				),
+				'mcp' => array(
+					'type'                 => 'object',
+					'additionalProperties' => false,
+					'properties'           => array(
+						// Both default to false: exposing form data to external
+						// agents, and letting one rewrite forms, are deliberate
+						// opt-ins rather than something an admin discovers after
+						// the fact.
+						'mcp_enabled'       => array(
+							'type'    => 'boolean',
+							'default' => false,
+						),
+						'mcp_allow_updates' => array(
+							'type'    => 'boolean',
+							'default' => false,
+						),
+					),
+				),
 			),
 		);
 		return $schema;
