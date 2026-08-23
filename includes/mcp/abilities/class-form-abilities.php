@@ -463,6 +463,37 @@ final class Form_Abilities {
 					return Forms_Service::delete_form( is_array( $input ) ? $input : array() );
 				},
 			),
+
+			'quillforms/restore-form'         => array(
+				'label'               => __( 'Restore a trashed form', 'quillforms' ),
+				'description'         => __( 'Restores a form from the trash. Use quillforms/list-forms with status "trash" to find the id. Only works for trashed forms — a form deleted with force cannot be recovered.', 'quillforms' ),
+				'permission_callback' => $permission,
+				'annotations'         => array(
+					'readonly'   => false,
+					'destructive' => false,
+					'idempotent' => true,
+				),
+				'input_schema'        => array(
+					'type'                 => 'object',
+					'properties'           => array(
+						'form_id' => Schemas::form_id_property(),
+					),
+					'required'             => array( 'form_id' ),
+					'additionalProperties' => false,
+				),
+				'output_schema'       => array(
+					'type'       => 'object',
+					'properties' => array(
+						'id'       => array( 'type' => 'integer' ),
+						'title'    => array( 'type' => 'string' ),
+						'status'   => array( 'type' => 'string' ),
+						'restored' => array( 'type' => 'boolean' ),
+					),
+				),
+				'execute_callback'    => static function ( $input = null ) {
+					return Forms_Service::restore_form( is_array( $input ) ? $input : array() );
+				},
+			),
 		);
 	}
 }

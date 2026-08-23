@@ -781,6 +781,59 @@ final class Forms_Service {
 	}
 
 	/**
+	 * Restore a trashed form.
+	 *
+	 * The counterpart to the non-forced delete: without it, an agent that
+	 * trashed the wrong form has no way to put it back and has to send the
+	 * user to the admin.
+	 *
+	 * @since 5.8.0
+	 *
+	 * @param array $input Input.
+	 * @return array|WP_Error
+	 */
+	public static function restore_form( array $input ) {
+		$form_id = self::validate_form_id( $input['form_id'] ?? 0 );
+		if ( is_wp_error( $form_id ) ) {
+			return $form_id;
+		}
+
+		$post = get_post( $form_id );
+
+		if ( 'trash' !== $post->post_status ) {
+			return new WP_Error(
+				'quillforms_mcp_not_trashed',
+				sprintf(
+					'Form %d is not in the trash (its status is "%s"), so there is nothing to restore.',
+					(int) $form_id,
+					(string) $post->post_status
+				),
+				array( 'status' => 409 )
+			);
+		}
+
+		if ( ! wp_untrash_post( $form_id ) ) {
+			return new WP_Error(
+				'quillforms_mcp_restore_failed',
+				sprintf( 'Could not restore form %d.', (int) $form_id ),
+				array( 'status' => 500 )
+			);
+		}
+
+		// WordPress restores to whatever wp_untrash_post_set_previous_status
+		// decides, which on older behaviour is 'draft'. Report the real result
+		// rather than assuming it came back published.
+		$restored = get_post( $form_id );
+
+		return array(
+			'id'       => (int) $form_id,
+			'title'    => (string) get_the_title( $form_id ),
+			'status'   => (string) $restored->post_status,
+			'restored' => true,
+		);
+	}
+
+	/**
 	 * Merge attributes into one block anywhere in the tree.
 	 *
 	 * @since 5.8.0

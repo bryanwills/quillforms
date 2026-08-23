@@ -547,6 +547,19 @@ const Settings = () => {
 				</div>
 			</div>
 
+			{settings.enabled && settings.allow_updates && (
+				<div className="quillforms-mcp-settings__warning">
+					{__(
+						'AI clients can now change and delete your forms. Try this on a staging site or a copy of a form before pointing it at a live one — an assistant can misread an instruction, and edits are applied immediately.',
+						'quillforms'
+					)}{' '}
+					{__(
+						'Deleting a field does not delete the answers already given to it, but those answers stop matching a question. Forms deleted without "force" go to the trash and can be restored.',
+						'quillforms'
+					)}
+				</div>
+			)}
+
 			{settings.enabled && (
 				<>
 					<div className="quillforms-mcp-settings__section">
