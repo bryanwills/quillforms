@@ -57,6 +57,9 @@ final class Forms_Service {
 		$page     = max( 1, $page );
 
 		if ( 'any' === $status ) {
+			// Trash is excluded from "any" on purpose — an agent listing forms
+			// wants the live ones — but is reachable explicitly, so a form
+			// deleted by mistake can still be found and restored.
 			$post_status = array( 'publish', 'draft', 'pending', 'private' );
 		} else {
 			$post_status = array( $status );
@@ -354,9 +357,27 @@ final class Forms_Service {
 
 		$saved = self::save( $form_id, $body );
 		if ( is_wp_error( $saved ) ) {
-			// Roll back so a validation failure does not leave an empty husk.
-			wp_delete_post( $form_id, true );
-			return $saved;
+			// Roll back so a validation failure does not leave an empty husk —
+			// but only if the form really is still empty. A partial write, or
+			// an addon that hooked the insert and attached its own data, means
+			// a force-delete would destroy more than this call created; leaving
+			// a draft behind is the lesser harm, and the error names it.
+			$written = get_post_meta( $form_id, 'blocks', true );
+
+			if ( empty( $written ) ) {
+				wp_delete_post( $form_id, true );
+				return $saved;
+			}
+
+			return new WP_Error(
+				'quillforms_mcp_partial_create',
+				sprintf(
+					'Form %d was created but could not be fully saved: %s. It has been left as a draft for you to inspect or delete.',
+					(int) $form_id,
+					$saved->get_error_message()
+				),
+				array( 'status' => 500 )
+			);
 		}
 
 		return self::get_form( array( 'form_id' => $form_id ) );
@@ -393,10 +414,15 @@ final class Forms_Service {
 		// answers' meaning with it, since existing responses keep pointing at a
 		// block id that no longer exists. Require the caller to acknowledge
 		// each removal by name rather than discovering it afterwards.
-		$existing = self::read_blocks( $form_id );
+		// Both sides are flattened before comparing. A field nested inside a
+		// group is just as gone as a top-level one when it disappears, so a
+		// guard that only diffed the outer array would report "nothing
+		// deleted" while wiping every child of a group — worse than no guard,
+		// because it reads as an all-clear.
+		$existing = self::flatten_blocks( self::read_blocks( $form_id ) );
 		$kept     = array();
-		foreach ( $prepared as $block ) {
-			$kept[ $block['id'] ] = true;
+		foreach ( self::flatten_blocks( $prepared ) as $block ) {
+			$kept[ (string) $block['id'] ] = true;
 		}
 
 		$removed = array();
@@ -470,7 +496,9 @@ final class Forms_Service {
 		$blocks = self::read_blocks( $form_id );
 
 		$block = array(
-			'id'         => self::generate_block_id( $blocks ),
+			// Collision-check against nested ids too: block ids must be unique
+			// across the whole form, not just the top level.
+			'id'         => self::generate_block_id( self::flatten_blocks( $blocks ) ),
 			'name'       => $name,
 			'attributes' => isset( $input['attributes'] ) && is_array( $input['attributes'] ) ? $input['attributes'] : array(),
 		);
@@ -510,24 +538,14 @@ final class Forms_Service {
 
 		$block_id = isset( $input['block_id'] ) ? (string) $input['block_id'] : '';
 		$blocks   = self::read_blocks( $form_id );
-		$found    = false;
+		$patch    = isset( $input['attributes'] ) && is_array( $input['attributes'] )
+			? $input['attributes']
+			: array();
 
-		foreach ( $blocks as $index => $block ) {
-			if ( isset( $block['id'] ) && (string) $block['id'] === $block_id ) {
-				$existing = isset( $block['attributes'] ) && is_array( $block['attributes'] )
-					? $block['attributes']
-					: array();
-				$patch    = isset( $input['attributes'] ) && is_array( $input['attributes'] )
-					? $input['attributes']
-					: array();
-
-				// Merge rather than replace: an agent patching one attribute
-				// must not silently drop the rest of the field's config.
-				$blocks[ $index ]['attributes'] = array_replace( $existing, $patch );
-				$found                          = true;
-				break;
-			}
-		}
+		// Walks nested blocks too, so a field inside a group is addressable by
+		// its id like any other.
+		$found  = false;
+		$blocks = self::patch_block( $blocks, $block_id, $patch, $found );
 
 		if ( ! $found ) {
 			return new WP_Error(
@@ -565,16 +583,12 @@ final class Forms_Service {
 
 		$block_id = isset( $input['block_id'] ) ? (string) $input['block_id'] : '';
 		$blocks   = self::read_blocks( $form_id );
-		$remaining = array();
-		$found     = false;
 
-		foreach ( $blocks as $block ) {
-			if ( isset( $block['id'] ) && (string) $block['id'] === $block_id ) {
-				$found = true;
-				continue;
-			}
-			$remaining[] = $block;
-		}
+		// Walks nested blocks too. Deleting a group still takes its children
+		// with it — that is what deleting a container means — but a child can
+		// now also be removed on its own.
+		$found     = false;
+		$remaining = self::remove_block( $blocks, $block_id, $found );
 
 		if ( ! $found ) {
 			return new WP_Error(
@@ -617,11 +631,23 @@ final class Forms_Service {
 		if ( isset( $input['status'] ) && in_array( $input['status'], array( 'publish', 'draft' ), true ) ) {
 			$body['status'] = (string) $input['status'];
 		}
+		// Merge rather than replace, matching update-field: an agent flipping
+		// one setting must not silently wipe every other setting on the form.
+		// A caller that really wants to reset everything can read the current
+		// values and send the whole object back.
 		if ( isset( $input['settings'] ) && is_array( $input['settings'] ) ) {
-			$body['settings'] = $input['settings'];
+			$current          = Core::get_form_settings( $form_id );
+			$body['settings'] = array_replace(
+				is_array( $current ) ? $current : array(),
+				$input['settings']
+			);
 		}
 		if ( isset( $input['messages'] ) && is_array( $input['messages'] ) ) {
-			$body['messages'] = $input['messages'];
+			$current          = get_post_meta( $form_id, 'messages', true );
+			$body['messages'] = array_replace(
+				is_array( $current ) ? $current : array(),
+				$input['messages']
+			);
 		}
 		if ( isset( $input['theme_id'] ) ) {
 			$body['theme'] = (int) $input['theme_id'];
@@ -675,15 +701,47 @@ final class Forms_Service {
 			return $new_id;
 		}
 
-		// Copy the meta that defines the form. Deliberately excludes
-		// coupons_usage_count, which is per-form usage state, not definition.
-		$keys = array( 'blocks', 'messages', 'notifications', 'payments', 'products', 'theme', 'settings', 'quiz', 'customCSS' );
-		foreach ( $keys as $key ) {
-			$value = get_post_meta( $form_id, $key, true );
-			if ( '' !== $value && null !== $value ) {
-				update_post_meta( $new_id, $key, $value );
+		// Copy everything except an explicit deny list, rather than copying an
+		// allow list of keys known at the time this was written. Addons store
+		// their per-form configuration in their own meta (addon_emailoctopus,
+		// and so on); an allow list silently drops them, so the copy looks
+		// right in the editor while its integrations quietly do nothing.
+		$skip = array(
+			// Per-form usage state, not part of the definition.
+			'coupons_usage_count',
+			// WordPress internals that must not follow a new post.
+			'_edit_lock',
+			'_edit_last',
+			'_wp_old_slug',
+			'_thumbnail_id',
+		);
+
+		foreach ( get_post_meta( $form_id ) as $key => $values ) {
+			if ( in_array( $key, $skip, true ) || ! is_array( $values ) ) {
+				continue;
+			}
+
+			foreach ( $values as $value ) {
+				// get_post_meta() without $single returns raw serialized
+				// strings; unserialize so update_post_meta stores the same
+				// structure the source form had.
+				update_post_meta( $new_id, $key, maybe_unserialize( $value ) );
 			}
 		}
+
+		/**
+		 * Let addons react to a form being duplicated.
+		 *
+		 * The blocks were written directly rather than through the REST fields,
+		 * so the usual quillforms_form_blocks_updated action does not fire for
+		 * a copy. Addons that maintain derived state per form need this.
+		 *
+		 * @since 5.8.0
+		 *
+		 * @param int $new_id  The new form id.
+		 * @param int $form_id The form it was copied from.
+		 */
+		do_action( 'quillforms_form_duplicated', $new_id, $form_id );
 
 		return self::get_form( array( 'form_id' => $new_id ) );
 	}
@@ -723,10 +781,120 @@ final class Forms_Service {
 	}
 
 	/**
+	 * Merge attributes into one block anywhere in the tree.
+	 *
+	 * @since 5.8.0
+	 *
+	 * @param array   $blocks   Blocks.
+	 * @param string  $block_id Target id.
+	 * @param array   $patch    Attributes to merge.
+	 * @param boolean $found    Set to true when the target is reached.
+	 * @return array
+	 */
+	private static function patch_block( array $blocks, $block_id, array $patch, &$found ) {
+		foreach ( $blocks as $index => $block ) {
+			if ( ! is_array( $block ) ) {
+				continue;
+			}
+
+			if ( isset( $block['id'] ) && (string) $block['id'] === $block_id ) {
+				$existing = isset( $block['attributes'] ) && is_array( $block['attributes'] )
+					? $block['attributes']
+					: array();
+
+				// Merge rather than replace: an agent patching one attribute
+				// must not silently drop the rest of the field's config.
+				$blocks[ $index ]['attributes'] = array_replace( $existing, $patch );
+				$found                          = true;
+
+				return $blocks;
+			}
+
+			if ( ! empty( $block['innerBlocks'] ) && is_array( $block['innerBlocks'] ) ) {
+				$blocks[ $index ]['innerBlocks'] = self::patch_block(
+					$block['innerBlocks'],
+					$block_id,
+					$patch,
+					$found
+				);
+
+				if ( $found ) {
+					return $blocks;
+				}
+			}
+		}
+
+		return $blocks;
+	}
+
+	/**
+	 * Remove one block from anywhere in the tree.
+	 *
+	 * @since 5.8.0
+	 *
+	 * @param array   $blocks   Blocks.
+	 * @param string  $block_id Target id.
+	 * @param boolean $found    Set to true when the target is reached.
+	 * @return array
+	 */
+	private static function remove_block( array $blocks, $block_id, &$found ) {
+		$remaining = array();
+
+		foreach ( $blocks as $block ) {
+			if ( ! is_array( $block ) ) {
+				continue;
+			}
+
+			if ( isset( $block['id'] ) && (string) $block['id'] === $block_id ) {
+				$found = true;
+				continue;
+			}
+
+			if ( ! empty( $block['innerBlocks'] ) && is_array( $block['innerBlocks'] ) ) {
+				$block['innerBlocks'] = self::remove_block( $block['innerBlocks'], $block_id, $found );
+			}
+
+			$remaining[] = $block;
+		}
+
+		return $remaining;
+	}
+
+	/**
+	 * Flatten a block tree into a single list, children included.
+	 *
+	 * Used for comparisons that must treat a nested field as a real field —
+	 * counting, and diffing what a write would remove.
+	 *
+	 * @since 5.8.0
+	 *
+	 * @param array $blocks Blocks, possibly containing innerBlocks.
+	 * @return array
+	 */
+	private static function flatten_blocks( array $blocks ) {
+		$flat = array();
+
+		foreach ( $blocks as $block ) {
+			if ( ! is_array( $block ) ) {
+				continue;
+			}
+
+			$flat[] = $block;
+
+			if ( ! empty( $block['innerBlocks'] ) && is_array( $block['innerBlocks'] ) ) {
+				$flat = array_merge( $flat, self::flatten_blocks( $block['innerBlocks'] ) );
+			}
+		}
+
+		return $flat;
+	}
+
+	/**
 	 * Normalize a caller-supplied blocks array.
 	 *
 	 * Fills in missing ids so an agent can post blocks without inventing them,
-	 * and guarantees every block has an attributes object.
+	 * guarantees every block has an attributes object, and preserves nested
+	 * children.
 	 *
 	 * @since 1.0.0
 	 *
@@ -748,13 +916,25 @@ final class Forms_Service {
 			}
 			$seen[ $id ] = true;
 
-			$prepared[] = array(
-				'id'         => $id,
-				'name'       => (string) $block['name'],
-				'attributes' => isset( $block['attributes'] ) && is_array( $block['attributes'] )
-					? $block['attributes']
-					: array(),
-			);
+			// Start from the block as supplied rather than rebuilding it from
+			// three known keys. Group blocks carry their children in
+			// `innerBlocks`, and any key this method does not know about would
+			// otherwise be silently dropped on write — turning an edit to one
+			// field into the deletion of every field nested under it.
+			$normalized               = $block;
+			$normalized['id']         = $id;
+			$normalized['name']       = (string) $block['name'];
+			$normalized['attributes'] = isset( $block['attributes'] ) && is_array( $block['attributes'] )
+				? $block['attributes']
+				: array();
+
+			if ( isset( $block['innerBlocks'] ) ) {
+				$normalized['innerBlocks'] = is_array( $block['innerBlocks'] )
+					? self::prepare_blocks( $block['innerBlocks'] )
+					: array();
+			}
+
+			$prepared[] = $normalized;
 		}
 
 		return $prepared;

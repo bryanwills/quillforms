@@ -40,8 +40,8 @@ final class Form_Abilities {
 					'properties'           => array(
 						'status'   => array(
 							'type'        => 'string',
-							'enum'        => array( 'any', 'publish', 'draft' ),
-							'description' => __( 'Filter by publication status. Defaults to any.', 'quillforms' ),
+							'enum'        => array( 'any', 'publish', 'draft', 'trash' ),
+							'description' => __( 'Filter by publication status. Defaults to any, which covers live forms; pass trash to find forms that were deleted.', 'quillforms' ),
 						),
 						'search'   => array(
 							'type'        => 'string',
@@ -360,7 +360,7 @@ final class Form_Abilities {
 
 			'quillforms/update-form-settings' => array(
 				'label'               => __( 'Update form settings', 'quillforms' ),
-				'description'         => __( 'Updates a form title, publication status, settings, messages or theme without touching its fields.', 'quillforms' ),
+				'description'         => __( 'Updates a form title, publication status, settings, messages or theme without touching its fields. Supplied settings and messages are merged over the existing ones, so keys you omit keep their current values.', 'quillforms' ),
 				'permission_callback' => $permission,
 				'annotations'         => array(
 					'readonly'   => false,

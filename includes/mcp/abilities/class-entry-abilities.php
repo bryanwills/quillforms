@@ -231,17 +231,38 @@ final class Entry_Abilities {
 	 * @return array
 	 */
 	private static function block_labels( array $form_data ) {
-		$labels = array();
 		$blocks = isset( $form_data['blocks'] ) && is_array( $form_data['blocks'] ) ? $form_data['blocks'] : array();
 
+		// Recurse: fields inside a group are answered like any other field, so
+		// without walking innerBlocks their answers come back keyed by raw
+		// block id instead of the question the person actually saw.
+		return self::collect_labels( $blocks );
+	}
+
+	/**
+	 * Walk a block tree collecting id => label.
+	 *
+	 * @since 5.8.0
+	 *
+	 * @param array $blocks Blocks, possibly containing innerBlocks.
+	 * @return array
+	 */
+	private static function collect_labels( array $blocks ) {
+		$labels = array();
+
 		foreach ( $blocks as $block ) {
-			if ( ! isset( $block['id'] ) ) {
+			if ( ! is_array( $block ) || ! isset( $block['id'] ) ) {
 				continue;
 			}
+
 			$label = $block['attributes']['label'] ?? '';
 			$label = is_string( $label ) ? trim( wp_strip_all_tags( $label ) ) : '';
 
 			$labels[ $block['id'] ] = '' !== $label ? $label : (string) $block['id'];
+
+			if ( ! empty( $block['innerBlocks'] ) && is_array( $block['innerBlocks'] ) ) {
+				$labels = array_merge( $labels, self::collect_labels( $block['innerBlocks'] ) );
+			}
 		}
 
 		return $labels;
