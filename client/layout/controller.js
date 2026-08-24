@@ -29,6 +29,7 @@ import IntegrationsPage from '../pages/integrations';
 import Addons from '../pages/addons';
 import Settings from '../pages/settings';
 import License from '../pages/license';
+import MCP from '../pages/mcp';
 import System from '../pages/system';
 import Support from '../pages/support';
 import ImportExport from '../pages/import-export';
@@ -154,6 +155,11 @@ registerAdminPage('addons', {
 registerAdminPage('settings', {
 	component: Settings,
 	path: 'settings',
+});
+
+registerAdminPage('mcp', {
+	component: MCP,
+	path: 'mcp',
 });
 
 registerAdminPage('license', {

@@ -70,6 +70,19 @@
 		}
 	}
 
+	.qf-admin-sidebar-nav-item__badge {
+		margin-left: 8px;
+		background: linear-gradient(310deg, #7c3aed, #cb0c9f);
+		color: #fff;
+		font-size: 10px;
+		font-weight: 700;
+		letter-spacing: 0.5px;
+		text-transform: uppercase;
+		border-radius: 9px;
+		padding: 2px 7px;
+		line-height: 1.5;
+	}
+
 	.qf-admin-sidebar-nav-item__icon {
 		display: flex;
 		justify-content: center;

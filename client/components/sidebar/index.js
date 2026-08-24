@@ -24,6 +24,7 @@ import LicenseIcon from './license-icon';
 import SupportIcon from './support-icon';
 import SystemIcon from './system-icon';
 import ImportExportIcon from './import-export-icon';
+import McpIcon from './mcp-icon';
 const clean = (str) => {
 	return str.replace('quillforms', '').replace('&path=', '');
 };
@@ -85,11 +86,19 @@ const Sidebar = () => {
 										<SystemIcon />
 									) : page[2] === 'quillforms&path=import-export' ? (
 										<ImportExportIcon />
+									) : page[2] === 'quillforms&path=mcp' ? (
+										<McpIcon />
 									) : (
 										<SettingsIcon />
 									)}
 								</div>
 								{page[0]}
+								{page[2] === 'quillforms&path=mcp' &&
+									qfAdmin.mcpIsNew && (
+										<span className="qf-admin-sidebar-nav-item__badge">
+											New
+										</span>
+									)}
 							</NavLink>
 						);
 					} else {

@@ -91,7 +91,7 @@ const CLIENT_TABS = [
 	},
 ];
 
-const Settings = () => {
+const MCP = () => {
 	const [settings, setSettings] = useState(null);
 	const [loading, setLoading] = useState(true);
 	const [saving, setSaving] = useState(false);
@@ -368,19 +368,36 @@ const Settings = () => {
 		setTesting(false);
 	};
 
+	// The heading is repeated in the early returns so the page still
+	// identifies itself while loading or when settings cannot be read.
+	const heading = (
+		<h1 className="quillforms-mcp-page__heading">
+			{__('MCP Server', 'quillforms')}
+			<span className="quillforms-mcp-page__badge">
+				{__('New', 'quillforms')}
+			</span>
+		</h1>
+	);
+
 	if (loading) {
 		return (
-			<div className="quillforms-mcp-settings">
-				{__('Loading…', 'quillforms')}
+			<div className="quillforms-mcp-page">
+				{heading}
+				<div className="quillforms-mcp-settings">
+					{__('Loading…', 'quillforms')}
+				</div>
 			</div>
 		);
 	}
 
 	if (!settings) {
 		return (
-			<div className="quillforms-mcp-settings">
-				<div className="quillforms-mcp-settings__error">
-					{error ?? __('Settings unavailable.', 'quillforms')}
+			<div className="quillforms-mcp-page">
+				{heading}
+				<div className="quillforms-mcp-settings">
+					<div className="quillforms-mcp-settings__error">
+						{error ?? __('Settings unavailable.', 'quillforms')}
+					</div>
 				</div>
 			</div>
 		);
@@ -490,13 +507,15 @@ const Settings = () => {
 	};
 
 	return (
-		<div className="quillforms-mcp-settings">
-			<p className="quillforms-mcp-settings__intro">
-				{__(
-					'Connect Quill Forms to Claude, ChatGPT and other AI assistants over the Model Context Protocol, so you can build and manage forms by describing what you want.',
-					'quillforms'
-				)}
-			</p>
+		<div className="quillforms-mcp-page">
+			{heading}
+			<div className="quillforms-mcp-settings">
+				<p className="quillforms-mcp-settings__intro">
+					{__(
+						'Connect Quill Forms to Claude, ChatGPT and other AI assistants over the Model Context Protocol, so you can build and manage forms by describing what you want.',
+						'quillforms'
+					)}
+				</p>
 
 			{!settings.abilities_api && (
 				<div className="quillforms-mcp-settings__warning">
@@ -862,9 +881,10 @@ const Settings = () => {
 						)}
 					</div>
 				</>
-			)}
+				)}
+			</div>
 		</div>
 	);
 };
 
-export default Settings;
+export default MCP;

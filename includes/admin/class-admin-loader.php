@@ -113,6 +113,9 @@ class Admin_Loader {
 				'adminUrl'                            => admin_url(),
 				'assetsBuildUrl'                      => QUILLFORMS_PLUGIN_URL,
 				'submenuPages'                        => $submenu['quillforms'] ?? array(),
+				// Drives the "New" badge on the MCP Server menu item. Cleared
+				// once the page has been opened, so it stops nagging.
+				'mcpIsNew'                            => ! get_option( 'quillforms_mcp_page_seen' ),
 				'site_store_nonce'                    => wp_create_nonce( 'quillforms_site_store' ),
 				'license_nonce'                       => wp_create_nonce( 'quillforms_license' ),
 				'duplicate_nonce'                     => wp_create_nonce( 'quillforms_duplicate' ),

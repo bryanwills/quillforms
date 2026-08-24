@@ -65,6 +65,10 @@ class Admin {
 	 */
 	public function admin_hooks() {
 		add_action( 'admin_menu', array( $this, 'create_admin_menu_pages' ) );
+		// admin_footer, not admin_init: the flag is read while localizing the
+		// client script, so clearing it earlier would hide the badge on the
+		// very visit that is supposed to show it.
+		add_action( 'admin_footer', array( $this, 'maybe_mark_mcp_page_seen' ) );
 		add_action( 'wp_ajax_quillforms_duplicate_form', array( $this, 'duplicate_form' ) );
 		add_action( 'wp_ajax_quillforms_install_doublescale', array( $this, 'install_doublescale' ) );
 		add_action( 'wp_ajax_quillforms_activate_doublescale', array( $this, 'activate_doublescale' ) );
@@ -72,6 +76,31 @@ class Admin {
 		add_filter( 'post_type_link', array( $this, 'remove_cpt_slug' ), 10, 3 );
 		add_filter('rewrite_rules_array', array($this, 'rewrite_quillforms_rules') );
 		
+	}
+
+	/**
+	 * Drop the "New" badge once the MCP page has been opened.
+	 *
+	 * Runs late in the request so the badge survives the visit that reveals it,
+	 * and is gone from the next page load onwards.
+	 *
+	 * @since 5.8.0
+	 *
+	 * @return void
+	 */
+	public function maybe_mark_mcp_page_seen() {
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only check of the current screen, no state is changed on behalf of the user.
+		if ( ! isset( $_GET['page'], $_GET['path'] ) || 'quillforms' !== $_GET['page'] || 'mcp' !== $_GET['path'] ) {
+			return;
+		}
+
+		if ( ! current_user_can( apply_filters( 'quillforms_admin_capability_filter', 'manage_quillforms' ) ) ) {
+			return;
+		}
+
+		if ( ! get_option( 'quillforms_mcp_page_seen' ) ) {
+			update_option( 'quillforms_mcp_page_seen', 1 );
+		}
 	}
 
 	/**
@@ -272,6 +301,9 @@ class Admin {
 
 		// Add settings page as a submenu page.
 		add_submenu_page( 'quillforms', __( 'Settings', 'quillforms' ), __( 'Settings', 'quillforms' ), apply_filters('quillforms_admin_capability_filter',  'manage_quillforms'), 'quillforms&path=settings', array( Admin_Loader::class, 'page_wrapper' ) );
+
+		// Add MCP server page as a submenu page.
+		add_submenu_page( 'quillforms', __( 'MCP Server', 'quillforms' ), __( 'MCP Server', 'quillforms' ), apply_filters('quillforms_admin_capability_filter',  'manage_quillforms'), 'quillforms&path=mcp', array( Admin_Loader::class, 'page_wrapper' ) );
 
 		// Add license page as a submenu page.
 		add_submenu_page( 'quillforms', __( 'License', 'quillforms' ), __( 'License', 'quillforms' ), apply_filters('quillforms_admin_capability_filter',  'manage_quillforms'), 'quillforms&path=license', array( Admin_Loader::class, 'page_wrapper' ) );

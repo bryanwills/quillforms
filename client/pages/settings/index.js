@@ -25,7 +25,6 @@ import Integrations from './integrations';
 import Emails from './emails';
 import ReCAPTCHA from './recaptcha';
 import Geolocation from './geolocation';
-import MCP from './mcp';
 
 
 const Settings = () => {
@@ -62,10 +61,6 @@ const Settings = () => {
 		geolocation: {
 			title: 'Geolocation',
 			render: <Geolocation />,
-		},
-		mcp: {
-			title: 'MCP Server',
-			render: <MCP />,
 		},
 	};
 
