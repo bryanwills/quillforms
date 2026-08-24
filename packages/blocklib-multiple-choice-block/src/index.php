@@ -176,6 +176,49 @@ class Multiple_Choice_Block_Type extends Block_Type {
 	}
 
 	/**
+	 * Sanitize field value.
+	 *
+	 * Multiple Choice answers may include a respondent-supplied "Other" value
+	 * nested inside an array. Strip tags at save time so stored entries cannot
+	 * carry executable markup into the admin results screen.
+	 *
+	 * @since 5.7.2
+	 *
+	 * @param mixed $value     The entry value.
+	 * @param array $form_data The form data.
+	 *
+	 * @return mixed Sanitized entry value.
+	 */
+	public function sanitize_field( $value, $form_data ) {
+		if ( ! is_array( $value ) ) {
+			return sanitize_text_field( $value );
+		}
+
+		$sanitized = array();
+
+		foreach ( $value as $item ) {
+			if ( is_array( $item ) ) {
+				$sanitized_item = array();
+
+				if ( isset( $item['type'] ) ) {
+					$sanitized_item['type'] = sanitize_key( $item['type'] );
+				}
+
+				if ( isset( $item['value'] ) ) {
+					$sanitized_item['value'] = sanitize_text_field( $item['value'] );
+				}
+
+				$sanitized[] = $sanitized_item;
+				continue;
+			}
+
+			$sanitized[] = sanitize_text_field( $item );
+		}
+
+		return $sanitized;
+	}
+
+	/**
 	 * Get readable value.
 	 *
 	 * @since 1.0.0
@@ -196,7 +239,7 @@ class Multiple_Choice_Block_Type extends Block_Type {
 				if ( is_array( $item ) && isset( $item['type'] ) && $item['type'] === 'other' && isset( $item['value'] ) ) {
 					$other_text = trim( $item['value'] );
 					if ( ! empty( $other_text ) ) {
-						$choice_labels[] = 'Other: ' . $other_text;
+						$choice_labels[] = 'Other: ' . esc_html( $other_text );
 					}
 				}
 				// Handle regular choices

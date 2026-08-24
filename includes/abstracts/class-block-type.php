@@ -403,7 +403,10 @@ abstract class Block_Type extends stdClass {
 		if ( ! is_array( $value ) ) {
 			return sanitize_text_field( $value );
 		}
-		return $value;
+		// Sanitize array values recursively. Returning arrays untouched lets
+		// submitted markup reach the entries screen, which renders readable
+		// values as HTML.
+		return map_deep( $value, 'sanitize_text_field' );
 	}
 
 	/**

@@ -187,7 +187,7 @@ class Website_Block_Type extends Block_Type {
 	public function get_readable_value( $value, $form_data, $context = 'html' ) {
 		switch ( $context ) {
 			case 'html':
-				return '<a href="' . $value . '">' . $value . '</a>';
+				return '<a href="' . esc_url( $value ) . '">' . esc_html( $value ) . '</a>';
 			case 'spreadsheet':
 				return '=HYPERLINK("' . $value . '","' . $value . '")';
 			default:

@@ -246,7 +246,7 @@ class Form_Submission {
 		$this->entry->set_meta_value( 'user_ip_hash', quillforms_get_client_ip_hash() );
 		// user agent.
 		if ( ! Settings::get( 'disable_collecting_user_agent', false ) ) {
-			$this->entry->set_meta_value( 'user_agent', $_SERVER['HTTP_USER_AGENT'] ?? '' );
+			$this->entry->set_meta_value( 'user_agent', sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ?? '' ) ) );
 		}
 
 		// add sanitized fields.
